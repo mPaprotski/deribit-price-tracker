@@ -23,6 +23,15 @@ jobs:
         python-version: ["3.11", "3.12"]
 
     services:
+      redis:
+        image: redis:7.4
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
       postgres:
         image: postgres:16
         env:
@@ -38,6 +47,8 @@ jobs:
           --health-retries 10
 
     env:
+      REDIS_URL: redis://localhost:6379/0
+      TEST_REDIS_URL: redis://localhost:6379/1
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/deribit_test
       TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/deribit_test
 
@@ -52,7 +63,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: |
+            requirements.txt
+            requirements.lock
+
+      - name: Validate Docker Compose configuration
+        run: docker compose config --quiet
 
       - name: Install dependencies
         run: |
@@ -65,5 +81,33 @@ jobs:
           python -m scripts.init_db
           python -m scripts.init_db
 
-      - name: Run tests
-        run: python -m pytest -q -ra
+      - name: Run unit tests
+        run: python -m pytest -q -ra -m "not integration"
+
+      - name: Run PostgreSQL and Redis integration tests
+        run: python -m pytest -q -ra -m integration
+
+
+  compose:
+    name: Docker Compose end-to-end
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      WEB_PORT: "18000"
+      POSTGRES_USER: tracker
+      POSTGRES_PASSWORD: ci_password
+      POSTGRES_DB: tracker_ci
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build and start stack with mocked exchange
+        run: docker compose -p deribit-ci -f docker-compose.yml -f docker-compose.ci.yml up --build -d --wait --wait-timeout 180
+      - name: Verify periodic collection and API
+        run: python3 tests/support/check_compose.py
+      - name: Show service logs
+        if: always()
+        run: docker compose -p deribit-ci -f docker-compose.yml -f docker-compose.ci.yml logs --no-color --tail 100
+      - name: Stop test stack
+        if: always()
+        run: docker compose -p deribit-ci -f docker-compose.yml -f docker-compose.ci.yml down --volumes --remove-orphans

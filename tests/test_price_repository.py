@@ -5,6 +5,8 @@ from sqlalchemy import inspect
 
 from app.repositories.price_repository import PriceRepository
 
+pytestmark = pytest.mark.integration
+
 
 async def test_create_and_read_decimal(session):
     repository = PriceRepository(session)

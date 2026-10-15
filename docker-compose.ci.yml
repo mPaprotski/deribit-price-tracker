@@ -1,0 +1,32 @@
+# Test-only override; production Compose retains its five services.
+x-test-environment: &test-environment
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-deribit}
+  REDIS_URL: redis://redis:6379/0
+  DERIBIT_BASE_URL: http://deribit_mock:8080/api/v2
+  COLLECTION_INTERVAL: "2"
+
+services:
+  deribit_mock:
+    build: .
+    image: deribit-price-tracker:local
+    init: true
+    command: ["python", "/mock_deribit.py"]
+    volumes:
+      - ./tests/support/mock_deribit.py:/mock_deribit.py:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  web:
+    environment: *test-environment
+
+  celery_worker:
+    environment: *test-environment
+    depends_on:
+      deribit_mock:
+        condition: service_healthy
+
+  celery_beat:
+    environment: *test-environment

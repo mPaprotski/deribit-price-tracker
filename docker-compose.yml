@@ -1,0 +1,95 @@
+x-app: &app
+  build: .
+  image: deribit-price-tracker:local
+  restart: unless-stopped
+  init: true
+  environment:
+    DATABASE_URL: ${COMPOSE_DATABASE_URL:-postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-deribit}}
+    REDIS_URL: ${COMPOSE_REDIS_URL:-redis://redis:6379/0}
+    DERIBIT_BASE_URL: ${DERIBIT_BASE_URL:-https://www.deribit.com/api/v2}
+    COLLECTION_INTERVAL: ${COLLECTION_INTERVAL:-60}
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  stop_grace_period: 75s
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-deribit}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    <<: *app
+    command:
+      - /bin/sh
+      - -c
+      - python -m scripts.init_db && exec python -m scripts.run_api
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  celery_worker:
+    <<: *app
+    command: ["celery", "-A", "app.celery_app:celery_app", "worker", "--pool=prefork", "--concurrency=2", "--loglevel=${LOG_LEVEL:-INFO}"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.celery_app:celery_app inspect ping --destination celery@$$HOSTNAME --timeout 3"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  celery_beat:
+    <<: *app
+    command: ["celery", "-A", "app.celery_app:celery_app", "beat", "--loglevel=${LOG_LEVEL:-INFO}", "--schedule=/app/run/celerybeat-schedule", "--pidfile=/app/run/celerybeat.pid"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      celery_worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; from pathlib import Path; os.kill(int(Path('/app/run/celerybeat.pid').read_text()), 0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  postgres_data:
+  redis_data:
